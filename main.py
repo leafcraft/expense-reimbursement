@@ -1,0 +1,63 @@
+"""expense-reimbursement — Expense-Reimbursement Pod (LeafMesh).
+
+Boot order matters (SDK 2.4.131):
+  1. import agency.tools  → the @global_tool decorators run BEFORE from_yaml/start,
+     so Odo's read_proofs / read_calendar_window / list_prior_claims are registered.
+  2. LeafMesh.from_yaml(...) → auto_discover wires agency/*_agent.py to the YAML.
+  3. audit_logger.register(...) → attach the WORM sink to the custom external
+     expense_audit_logger_agent (must be after from_yaml, before start).
+  4. leafmesh.start().
+"""
+import asyncio
+import signal
+import sys
+
+from dotenv import load_dotenv
+from leafmesh import LeafMesh, LeafMeshLogger
+
+import agency.tools  # noqa: F401 — registers @global_tool tools before start()
+from agency._shared import audit_logger as _audit_logger
+
+load_dotenv()
+logger = LeafMeshLogger(__name__)
+
+leafmesh = LeafMesh.from_yaml("configs/config.yaml")
+
+# WORM audit sink — terminus for submissions, approvals, payouts, AND held gates.
+_audit_logger.register(leafmesh, "expense_audit_logger_agent")
+
+
+async def main():
+    await leafmesh.start()
+
+    agents = leafmesh.registry.list_agents() if getattr(leafmesh, "registry", None) else []
+    if agents:
+        logger.info("Registered agents: " + ", ".join(f"{a.name} ({a.agent_type})" for a in agents))
+    logger.info("expense-reimbursement is running — API docs: http://127.0.0.1:18820/docs")
+
+    # Trigger a claim (day-0, against the seed store — no connector needed):
+    #   curl -X POST http://127.0.0.1:18820/api/mesh/request \
+    #     -H "Content-Type: application/json" \
+    #     -d '{"entry_point":"submit_receipts","data":{"claim_id":"CLM-DEMO-001","message":"expenses for my Acme trip"}}'
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop_event.set)
+        await stop_event.wait()
+    else:
+        try:
+            await stop_event.wait()
+        except KeyboardInterrupt:
+            pass
+
+    logger.info("Shutting down...")
+    await leafmesh.stop()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

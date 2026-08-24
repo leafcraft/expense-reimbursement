@@ -1,0 +1,16 @@
+# expense-reimbursement — Expense-Reimbursement Pod
+#
+# Core LeafMesh installs everywhere (all LLM providers included) and runs the
+# pod DAY-0 against the seed proof store — no connector needed.
+leafmesh>=2.4.131
+python-dotenv>=1.0
+apscheduler>=3.10        # required for the daily_sweep wake_up cron to fire
+
+# ── Optional, per what you wire ──────────────────────────────────────────────
+# To connect real Outlook/Box (Tier 2 — the mcp block in configs/config.yaml):
+#     pip install 'leafmesh[mcp]>=2.4.131'
+#
+# For every channel/listener/knowledge/storage backend at once:
+#     pip install 'leafmesh[all]>=2.4.131'
+#   ⚠️ leafmesh[all] does NOT install on Python 3.12+ (it pulls `cchardet`,
+#      which has no wheel). On 3.12+ add only the specific extras you need.

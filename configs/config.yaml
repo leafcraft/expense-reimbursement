@@ -6,7 +6,7 @@
 # approval (Box e-sign) -> finance submission -> payout & live status.
 #
 # The pod is a TEAM, not a pipeline. Every wire is conditional; every hand-off
-# is a finished contract; every human gate default-denies on silence; the
+# is a finished contract; nothing is approved or paid on silence; the
 # finisher produces the real artifact and fails closed; the WORM sink is the
 # terminus. Systems (Outlook / Box / SAP) are TOOLS inside agents, never members.
 #
@@ -20,20 +20,15 @@ environment: development
 debug: true
 log_level: INFO
 
-persistence:
-  backend: redis
-  redis:
-    host: "${REDIS_HOST:localhost}"
-    port: ${REDIS_PORT:6379}
-    password: "${REDIS_PASSWORD:}"
-
 auto_discover:
   directory: ./agency
   pattern: '*_agent.py'
 
-# The Manager is the SUPERVISOR — it watches every hand-off and escalates
-# stalls / contract violations / repeated errors to the Finance-Ops Lead. It is
-# not a router in the middle of the team.
+# The Manager is the SUPERVISOR. It escalates to the Finance-Ops Lead when an
+# agent fails with an error that a retry cannot fix (auth, bad request, credit,
+# bad config), when 5 different agents fail in one session, or when restarts
+# run out. A broken hand-off contract only raises an alert. It does not chase
+# an unanswered approval. It is not a router in the middle of the team.
 manager:
   model: gpt-4o-mini
   domain: generic
@@ -41,10 +36,10 @@ manager:
     This mesh runs employee expense reimbursement. A successful claim flows
     receipts -> Odo (extract, confidence-scored) -> Fern (build the form,
     employee confirms) -> Sol (approval -> finance -> payout), and Remi keeps
-    live status. Escalate to the Finance-Ops Lead when: a claim loops on
-    re-extraction more than its bound, a policy call or possible duplicate is
-    raised, an approval round times out, or any agent hands off a malformed
-    artifact. Silence never advances a claim.
+    live status. Policy flags (over a policy cap, a possible duplicate
+    receipt) and a form that still does not tie out after one re-extraction go
+    to the Finance-Ops Lead on the agents' own wires. Nothing is approved or
+    paid on silence.
   routing:
     mode: static
   escalation:
@@ -54,15 +49,12 @@ manager:
     auto_escalate:
       max_retries: 3
       max_errors_per_session: 5
-      timeout_threshold: 2
-
-mesh:
-  call_timeout: 150
 
 # 2.4.131 runtime block — the ONE non-default this pod genuinely needs: proof
 # extraction over many receipts can run long. Everything else stays default
 # (omission is meaningful; we do not pre-fill defaults).
 timeouts:
+  mesh_call_default_timeout_s: 150
   llm_hard_timeout_s: 300
 
 # ── Entry points — one per real-world trigger ────────────────────────────────
@@ -171,9 +163,9 @@ agents:
     yields:
       extract_clean: "boolean"
       claim_class: "string"
-      low_confidence_fields: "array"
-      policy_flags: "array"
-      line_items: "array"
+      low_confidence_fields: {type: array, items: string}   # e.g. "rc-3:amount"
+      policy_flags: {type: array, items: string}            # e.g. "over_cap:rc-7:lodging", "duplicate_receipt:rc-9"
+      line_items: {type: array, items: object}              # one object per proof (proof_id, merchant, date, amount, currency, category, nights, <field>_confidence)
       question_for_employee: "string"
     # Playbook — the CRAFT, fetched on demand. Only `description` rides in the
     # prompt; `responsibility` is loaded when the model recognises the intent.
@@ -196,30 +188,34 @@ agents:
         description: "How to check a claim against policy before a form is built."
         responsibility: |
           1. Classify local / domestic / international and load the matching
-             policy set (limits per class and category, per-diem rules).
+             policy set with read_expense_policy (caps per class and category).
           2. Flag anything out of policy — do NOT waive it; route it to the
-             Finance-Ops Lead.
-          3. Detect duplicate receipts across this and prior claims.
+             Finance-Ops Lead. The floor re-checks USD lines against the caps
+             and adds over_cap flags you missed.
+          3. Detect duplicate receipts across this and prior claims (the floor
+             also checks same merchant + date + amount against prior claims).
         variables: [claim_id, claim_class]
     # Day-0 tool surface — reads the seed proof store so the pod runs with NO
     # connector wired. Each tool has a dev-store fallback and announces itself
     # (available:false) when it has no real source. See agency/tools.py.
-    tools: [read_proofs, read_calendar_window, list_prior_claims]
+    tools: [read_proofs, read_calendar_window, list_prior_claims, read_expense_policy]
     tool_categories: [extraction]
-    # ── To wire real Outlook/Box, uncomment and set the URLs (each named action
-    #    under `use:` becomes its own tool, e.g. outlook_read_messages). NOTE: the
-    #    SDK rejects an http mcp block with an EMPTY url at load, so this ships
-    #    commented — fill the URL, then uncomment. ──
+    # ── To wire real Outlook/Box: create the vault connections 'outlook_mcp'
+    #    and 'box_mcp' (each MCP server's URL + token — Infrastructure →
+    #    Integrations → MCP, or an "Add custom" record with service type Tools),
+    #    then uncomment — here before the first start, in Studio's YAML editor
+    #    after it (applies live, no restart). Each named action under `use:`
+    #    becomes its own tool (e.g. outlook_read_messages). A URL or token written
+    #    here is refused at load; a row whose connection does not exist switches
+    #    this agent off. ──
     # mcp:
-    #   - transport: http
-    #     url: "${OUTLOOK_MCP_URL}"
-    #     token: "${OUTLOOK_MCP_TOKEN:}"
+    #   - connection: outlook_mcp
+    #     transport: http
     #     use: [read_messages, read_attachments, read_calendar]
     #     name: outlook
     #     timeout: 30
-    #   - transport: http
-    #     url: "${BOX_MCP_URL}"
-    #     token: "${BOX_MCP_TOKEN:}"
+    #   - connection: box_mcp
+    #     transport: http
     #     use: [list_folder, read_file]
     #     name: box
     #     timeout: 30
@@ -254,11 +250,14 @@ agents:
       employee a single confirm-or-correct draft; on confirmation, hand the claim
       to Sol for approval routing. If a cross-check fails to tie out, return it to
       Odo with the specific discrepancy — never force the numbers to balance.
+      Odo gets one more pass; after that the floor sets retry_exhausted and the
+      claim goes to the Finance-Ops Lead.
       Load the `build_form` playbook for the assembly + cross-check order.
 
       OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
       {"form_built": ..., "cross_check_ok": ..., "discrepancy": ...,
-       "awaiting_confirmation": ..., "confirmed": ..., "artifact_path": ...}
+       "awaiting_confirmation": ..., "confirmed": ..., "artifact_path": ...,
+       "retry_exhausted": ...}
     yields:
       form_built: "boolean"
       cross_check_ok: "boolean"
@@ -266,6 +265,7 @@ agents:
       awaiting_confirmation: "boolean"
       confirmed: "boolean"
       artifact_path: "string"
+      retry_exhausted: "boolean"   # loop guard — true after the one allowed re-extraction
     playbook:
       - intent: build_form
         description: "How to assemble the reimbursement form and cross-check it."
@@ -284,7 +284,9 @@ agents:
       - agent: employee_human
         condition: "calling_agent_response.awaiting_confirmation == true"
       - agent: odo_extraction_agent
-        condition: "calling_agent_response.cross_check_ok == false and calling_agent_response.discrepancy != ''"
+        condition: "calling_agent_response.cross_check_ok == false and calling_agent_response.discrepancy != '' and calling_agent_response.retry_exhausted == false"
+      - agent: finance_ops_lead_human
+        condition: "calling_agent_response.cross_check_ok == false and calling_agent_response.retry_exhausted == true"
       - agent: sol_finance_agent
         condition: "calling_agent_response.confirmed == true"
 
@@ -292,10 +294,11 @@ agents:
   # Sol — Approvals & Finance Liaison (programmatic FINISHER). Routes the
   # confirmed claim through Box approval with e-signatures, submits the approved
   # pack to Finance, tracks to payout, and records every sign-off in an
-  # append-only ledger. This is the actuator BEHIND the human approval gate: it
+  # append-only ledger. This is the actuator BEHIND the human approval step: it
   # re-checks approval (fail closed on an unknown verdict), renders the approved
   # pack to ./out, deletes it on a blocked floor, and never approves or pays
-  # itself. See agency/sol_finance_agent.py for the enforce-issuance floor.
+  # itself. The approval must come from the approver seat (approver_human).
+  # See agency/sol_finance_agent.py for the enforce-issuance floor.
   # ─────────────────────────────────────────────────────────────────────────
   sol_finance_agent:
     name: sol_finance_agent
@@ -308,7 +311,7 @@ agents:
       submitted_to_finance: "boolean"
       pack_path: "string"
       status: "string"          # routed | approved | submitted | paid | blocked
-      block_reasons: "array"
+      block_reasons: {type: array, items: string}
     can_call:
       - agent: approver_human
         condition: "calling_agent_response.status == 'routed'"
@@ -319,13 +322,18 @@ agents:
 
   # ─────────────────────────────────────────────────────────────────────────
   # Human members — first-class, reached in the channel they already live in.
-  # Every gate DEFAULT-DENIES on timeout (fallback -> held_for_review -> audit).
+  # Nothing is approved or paid on silence. If nobody answers within the
+  # seat's human_timeout_seconds, the request waits no longer: its Inbox card
+  # closes and the ticket records that no reply came. Nobody is chased
+  # automatically. fallback_on_timeout / fallback_response below declare the
+  # intent (held_for_review -> audit); on leafmesh 2.4.486 a dual seat's
+  # timeout does not route it yet.
   # ─────────────────────────────────────────────────────────────────────────
 
   employee_human:
     name: employee_human
     agent_type: human
-    human_interface: webhook
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: dual        # dual belongs on the human/webhook boundary agent
     human_timeout_seconds: 172800   # 2 days to answer a question / confirm
     description: "Claimant — answers Odo's targeted questions, confirms Fern's form."
@@ -333,12 +341,6 @@ agents:
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
-      max_retries: 1
-      retry_delay: 2
     can_call:
       - agent: odo_extraction_agent
         condition: "calling_agent_response.from_agent == 'odo_extraction_agent'"
@@ -352,34 +354,30 @@ agents:
   approver_human:
     name: approver_human
     agent_type: human
-    human_interface: webhook
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: dual
-    human_timeout_seconds: 259200   # 3 days; reminders at T-2/T0 (Sol chases)
+    human_timeout_seconds: 172800   # 2 days — a line manager clears expense approvals within two working days
     description: "Manager — approves or rejects the claim in the Box workflow with an e-signature."
     fallback_on_timeout: true
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
     can_call:
       - agent: sol_finance_agent
-        condition: "calling_agent_response.human_message == 'approved'"
-      # On silence/hold, record it and let the Manager SUPERVISOR escalate to the
-      # Finance-Ops Lead (manager.escalation.targets) — no hardcoded human→human wire.
+        condition: "calling_agent_response.human_message == 'approved' or calling_agent_response.human_message == 'approve'"
+      # A reject or a hold is recorded in the audit sink and stops there.
+      # No human->human wire; nobody is chased automatically.
       - agent: expense_audit_logger_agent
-        condition: "calling_agent_response.human_message == 'held_for_review'"
+        condition: "calling_agent_response.human_message == 'rejected' or calling_agent_response.human_message == 'reject' or calling_agent_response.human_message == 'hold' or calling_agent_response.human_message == 'held_for_review'"
     yields:
-      human_message: "string"       # approved | rejected | held_for_review
+      human_message: "string"       # approved | rejected | hold | held_for_review
     inputs:
       claim_pack: "object"
 
   finance_ops_lead_human:
     name: finance_ops_lead_human
     agent_type: human
-    human_interface: webhook
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: dual
     human_timeout_seconds: 259200
     description: "Accountable owner — reviews exceptions, owns policy calls, decides every gate. Everything that leaves the pod."
@@ -387,10 +385,6 @@ agents:
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
     can_call:
       - agent: expense_audit_logger_agent
         condition: "always"
@@ -402,18 +396,14 @@ agents:
   finance_officer_human:
     name: finance_officer_human
     agent_type: human
-    human_interface: webhook
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: dual
-    human_timeout_seconds: 259200
-    description: "Finance — processes the approved, ledgered pack to payment (SAP posting later)."
+    human_timeout_seconds: 432000   # 5 days — reimbursements go out in the weekly payment run
+    description: "Finance — processes the approved, ledgered pack to payment in the weekly run (SAP posting later)."
     fallback_on_timeout: true
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
     can_call:
       - agent: expense_audit_logger_agent
         condition: "always"
@@ -430,7 +420,7 @@ agents:
     name: expense_audit_logger_agent
     agent_type: external
     framework: custom
-    communication_type: execute
+    communication_type: chain
     description: "WORM audit — hash-chains every decision, send, approval, and reversal. Terminus."
     connector_config:
       sink_type: local_file

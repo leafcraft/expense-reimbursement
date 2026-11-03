@@ -9,6 +9,13 @@ a field the model scored low, or a line-item missing an amount, or an illegible
 proof, can NEVER be passed downstream as "clean". If anything is uncertain, the
 extract is forced un-clean and turned into a question for the employee — a
 guessed number never reaches Fern's form.
+
+It also re-asserts two policy flags the model may miss (it may add flags, never
+remove them): a USD line (or a line with `amount_usd`) above its cap in the
+expense policy (store.POLICY_CAPS; lodging per night, meals per day), and a
+receipt already claimed on an earlier claim (same merchant + date + amount).
+Either flag keeps the extract un-clean and routes the claim to the Finance-Ops
+Lead. Foreign-currency lines without `amount_usd` are left to Odo's own check.
 """
 from __future__ import annotations
 
@@ -18,9 +25,51 @@ from typing import Any
 
 from leafmesh import LeafMeshLogger, chain
 
+try:
+    from ._shared import store
+except ImportError:  # pragma: no cover
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _shared import store  # type: ignore
+
 logger = LeafMeshLogger(__name__)
 
 _CONFIDENCE_MIN = 0.85
+
+
+def _usd_amount(li: dict) -> float | None:
+    for key in ("amount_usd",):
+        if isinstance(li.get(key), (int, float)):
+            return float(li[key])
+    if str(li.get("currency") or "").upper() == store.POLICY_CURRENCY \
+            and isinstance(li.get("amount"), (int, float)):
+        return float(li["amount"])
+    return None
+
+
+def _policy_flags(result: dict) -> list[str]:
+    """Deterministic policy re-check: caps + receipts already claimed."""
+    flags: list[str] = []
+    caps = store.POLICY_CAPS.get(str(result.get("claim_class") or "").strip().lower(), {})
+    claim_id = str(result.get("_claim_id") or result.get("claim_id") or "")
+    for li in result.get("line_items") or []:
+        if not isinstance(li, dict):
+            continue
+        pid = li.get("proof_id", "proof")
+        cat = str(li.get("category") or "").strip().lower()
+        usd = _usd_amount(li)
+        if usd is not None and cat in caps:
+            units = li.get("nights") if cat == "lodging" else li.get("days")
+            try:
+                units = max(int(units or 1), 1)
+            except (TypeError, ValueError):
+                units = 1
+            if usd / units > caps[cat] + 0.005:
+                flags.append(f"over_cap:{pid}:{cat}")
+        prior = store.find_prior_receipt(li.get("merchant"), li.get("date"),
+                                         li.get("amount"), claim_id)
+        if prior:
+            flags.append(f"duplicate_receipt:{pid}:{prior}")
+    return flags
 
 
 def enforce_confidence_floor(result: Any, context: dict) -> dict:
@@ -42,6 +91,14 @@ def enforce_confidence_floor(result: Any, context: dict) -> dict:
 
     low_conf = sorted(set(low_conf))
     result["low_confidence_fields"] = low_conf
+
+    # Policy re-check — the model may RAISE flags, never lower them.
+    flags = list(result.get("policy_flags") or [])
+    for f in _policy_flags(result):
+        if f not in flags:
+            flags.append(f)
+    result["policy_flags"] = flags
+    result.pop("_claim_id", None)
 
     if low_conf:
         result["extract_clean"] = False
@@ -69,4 +126,6 @@ async def odo_extraction_agent(llm_response: Any, input_data: dict, context: dic
     out.setdefault("policy_flags", [])
     out.setdefault("line_items", [])
     out.setdefault("question_for_employee", "")
+    if isinstance(input_data, dict) and input_data.get("claim_id"):
+        out["_claim_id"] = str(input_data["claim_id"])
     return out

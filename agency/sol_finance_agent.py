@@ -7,8 +7,9 @@ entry. It is the concrete "@chain fails closed":
 
   a) approval RE-CHECK — reaching this agent does not mean approved. An
      allow-token allowlist + block-token denylist; an UNKNOWN verdict fails closed.
-  b) deterministic invariants a human can't waive (a confirmed claim, real
-     line-items, an approver on record).
+  b) deterministic invariants a human can't waive: real line-items, and the
+     approval came from the approver seat (`approver_human`) — not from the
+     claimant's own seat or any other seat.
   c) render the real pack to ./out; on a tripped floor, DELETE the partial and
      record `status: blocked` with reasons — never a half-issued claim.
   d) dev-store recovery — after the HITL gate the upstream payload is dropped,
@@ -68,6 +69,24 @@ def _is_blocked(input_data: dict) -> bool:
     return _signal(input_data) in _BLOCK_TOKENS
 
 
+APPROVER_SEAT = "approver_human"
+
+
+def _approving_seat(input_data: dict) -> str:
+    """The seat that sent the approval (the SDK stamps `source_agent` on every
+    human reply). "" when the reply carries none."""
+    sources = [input_data]
+    up = input_data.get("upstream_yields")
+    if isinstance(up, dict):
+        sources.append(up)
+        sources.extend(v for v in up.values() if isinstance(v, dict))
+    for src in sources:
+        val = src.get("source_agent")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
 def _render_pack(claim: dict) -> str:
     _OUT_DIR.mkdir(parents=True, exist_ok=True)
     claim_id = str(claim.get("claim_id") or "claim")
@@ -119,6 +138,13 @@ def enforce_issuance_floor(result: Any, context: dict) -> dict:
         return result
 
     claim = result.get("_claim") or {}
+    seat = _approving_seat(result.get("_input") or {})
+    if seat != APPROVER_SEAT:   # fail closed: no seat on record is no approval
+        result.update(status="blocked", approved=False)
+        result["block_reasons"].append(
+            f"approval came from {seat or 'no seat on record'}, not the approver seat {APPROVER_SEAT}")
+        _delete_partial(result)
+        return result
     if not (claim.get("line_items")):
         result.update(status="blocked", approved=False)
         result["block_reasons"].append("no line-items to issue")
@@ -149,7 +175,7 @@ async def sol_finance_agent(llm_response: Any, input_data: dict, context: dict) 
     claim = _recover_claim(input_data, context)
     sid = resolve_session_id(input_data, context)
     if claim.get("line_items"):
-        stash_put(sid, claim)   # keep it recoverable across the approval gate
+        stash_put(sid, claim)   # keep it recoverable across the approval step
 
     out: dict[str, Any] = {
         "routed_for_approval": False, "approved": False, "submitted_to_finance": False,

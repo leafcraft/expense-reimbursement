@@ -13,9 +13,9 @@ Production swaps `_dispatch_local` for S3 Object Lock / Datadog / Splunk HEC.
 
 Hash-chain invariant: each entry embeds the SHA-256 of the prior entry's body,
 so any insertion or deletion is detectable post-hoc. This sink is the TERMINUS
-for every outcome that matters — a submitted claim, an approval, a payout, AND
-every gate HELD on timeout (default-deny): a held claim is recorded, never
-silently dropped.
+for every outcome that matters — a submitted claim, an approval, a payout, a
+reject and a hold. (On leafmesh 2.4.486 a seat that times out does not route
+here yet: its Inbox card closes and the ticket records that no reply came.)
 """
 from __future__ import annotations
 

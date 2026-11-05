@@ -18,10 +18,15 @@ runs that chain end to end, working alongside the people who already own the
 decisions. It wins "zero data-entry errors" the only honest way: **Odo never
 guesses** — a field it cannot read with confidence becomes a question to the
 employee, not a number in a form. **Fern cross-checks** before anyone sees the
-form and returns to Odo on a mismatch rather than balancing the books itself.
-**Sol re-checks that a human actually approved** before it issues anything, and
-**deletes a half-issued pack** if its floor trips. **Silence never advances a
-claim** — every gate default-denies. Every decision, send, and approval lands in
+form and returns to Odo on a mismatch (once — a second mismatch goes to the
+Finance-Ops Lead) rather than balancing the books itself. **Odo's floor
+re-checks the expense policy** — a hotel night over the cap or a receipt
+already claimed on an earlier claim goes to the Finance-Ops Lead, whatever the
+model said. **Sol re-checks that the approver actually approved** before it
+issues anything, and **deletes a half-issued pack** if its floor trips.
+**Silence never advances a claim** — if nobody answers within the reply window,
+the Inbox card closes and the ticket records that no reply came; nothing is
+approved or paid, and nobody is chased automatically. Every decision, send, and approval lands in
 a hash-chained WORM ledger. ROI: ≥75% less employee time per claim, real
 approval control, and a live "where is my claim?" answer.
 
@@ -39,8 +44,27 @@ approval control, and a live "where is my claim?" answer.
 | `finance_officer_human` | Finance (Human) | Processes the approved, ledgered pack to payment | Human gate |
 | `expense_audit_logger_agent` | WORM audit | Hash-chains every decision, approval, send, and held gate | External (custom sink); terminus |
 
-The **LeafMesh Manager** supervises — it reads every hand-off and escalates
-stalls / policy calls / approval timeouts to the Finance-Ops Lead automatically.
+Reply windows (`human_timeout_seconds`): Claimant 2 days, Manager (approver)
+2 days, Finance 5 days (the weekly payment run), Finance-Ops Lead 3 days.
+
+The **LeafMesh Manager** supervises. It escalates to the Finance-Ops Lead when an
+agent fails with an error a retry cannot fix (auth, bad request, credit, bad
+config), when 5 different agents fail in one session, or when restarts run out.
+A broken hand-off contract raises an alert only. Policy flags and a form that
+still does not tie out reach the Lead on the agents' own wires.
+
+### Expense policy (dev store: `agency/_shared/store.py` → `POLICY_CAPS`)
+
+| Class | Lodging / night | Meals / day | Airfare / ticket | Ground transport / day |
+|---|---|---|---|---|
+| local | — | $40 | — | $60 |
+| domestic | $250 | $75 | $750 | $120 |
+| international | $325 | $100 | $2,500 | $150 |
+
+Odo reads these with `read_expense_policy`; Odo's floor re-checks every USD line
+(and every line where Odo filled `amount_usd`) and flags `over_cap` itself.
+Foreign-currency lines without `amount_usd` rely on Odo's own conversion and
+check. Replace the table with your own policy.
 
 ## Configuration — what to set, in three tiers
 
@@ -56,16 +80,23 @@ that **announce themselves** until you wire Tiers 2–3.
 | `ANTHROPIC_API_KEY` | Odo + Fern (Claude) | **Required.** |
 | `OPENAI_API_KEY` | Remi + Manager (`gpt-4o-mini`) | **Required** unless you change the models. |
 | `REDIS_HOST` / `PORT` / `PASSWORD` | State store | Defaults to `localhost:6379`. `docker run -d -p 6379:6379 redis:7-alpine`. |
-| `HITL_OUTBOUND_URL` | Where human members are notified | Defaults to a local stub. |
+| *(no setting)* — human members | Human approvals | Answer in Studio's Inbox. To notify an external tool instead, create a vault connection (an "Add custom" record on the Infrastructure page, service type 'Outbound webhook') and set `webhook_config: {connection: <name>}` on the seat. |
 
-### Tier 2 — real proof connectors (set the URL, uncomment the `mcp` block)
-| Setting | Enables |
+### Tier 2 — real proof connectors (vault connection, then uncomment the `mcp` block)
+| Vault connection | Enables |
 |---|---|
-| `OUTLOOK_MCP_URL` / `_TOKEN` | Real receipt emails + calendar reads |
-| `BOX_MCP_URL` / `_TOKEN` | Real Box folder reads + approval workflow |
+| `outlook_mcp` — the Outlook MCP server's URL + token | Real receipt emails + calendar reads |
+| `box_mcp` — the Box MCP server's URL + token | Real Box folder reads + approval workflow |
 
-> ⚠️ The SDK rejects an `mcp` block with an **empty** URL at load, so the block
-> ships **commented** in `configs/config.yaml`. Fill the URL, then uncomment.
+> Addresses and tokens live **only in the vault** (Infrastructure → Integrations
+> → MCP, or an "Add custom" record with service type Tools) — a URL or token
+> written in `configs/config.yaml` is refused at load. Create the connections
+> **first**, then uncomment the `mcp` block — in `configs/config.yaml` before the
+> first start, in Studio's YAML editor after it (applies live, no restart; see
+> *Changing the configuration after the first start*). An agent whose named
+> connection does not exist is switched off until it is created. Nothing goes in
+> `.env`: `agency/tools.py` checks whether the vault record `outlook_mcp` or
+> `box_mcp` exists, only to word an empty dev-store answer.
 
 ### Tier 3 — SAP direct posting replaces the Finance email (later).
 
@@ -85,11 +116,19 @@ Submit a claim (day-0, against the seed store — no connector needed):
 curl -X POST http://127.0.0.1:18820/api/mesh/request \
   -H "Content-Type: application/json" \
   -d '{"entry_point":"submit_receipts",
-       "data":{"claim_id":"CLM-DEMO-001","message":"expenses for my Acme trip"}}'
+       "data":{"claim_id":"CLM-DEMO-001","message":"expenses for my Chicago client visit"}}'
 ```
 
 `CLM-DEMO-001` includes an illegible receipt on purpose — watch Odo ask the
-employee rather than guess. On approval, Sol renders the approved pack to `./out/`
+employee rather than guess. The other seed claims, one per route:
+
+| `claim_id` | What happens |
+|---|---|
+| `CLM-DEMO-002` | International (EUR); Odo converts, caps checked → form → approver |
+| `CLM-DEMO-003` | Clean domestic trip, $682.80, inside every cap → form → approver → Finance |
+| `CLM-DEMO-004` | Hotel at $412 a night vs the $250 cap → `over_cap` → Finance-Ops Lead |
+| `CLM-DEMO-005` | Re-claims the airfare from `CLM-DEMO-001` → `duplicate_receipt` → Finance-Ops Lead |
+ On approval, Sol renders the approved pack to `./out/`
 and appends `./data/expense_ledger.json`.
 
 > Packaging note: `pip install leafmesh` (core) includes all LLM providers and
@@ -101,3 +140,108 @@ and appends `./data/expense_ledger.json`.
 
 *Built with `create-leafmesh`. The config is the department; the PRD is the brief.*
 *Design doctrine: `.claude/skills/leafmesh/building-agents-thoroughly.md`.*
+
+## Changing the configuration after the first start
+
+`configs/config.yaml` is only the first-start seed. On the first start (an empty store) the agency imports it as version 1 and from then on keeps its configuration in the store. After that the file is not read again: an edit to it is **not** applied, even after a restart (the boot log says "that edit was NOT applied").
+
+To change a running agency:
+
+- **Studio** — its settings pages, or the raw YAML editor.
+- **API** — `PUT /api/yaml/raw` with an `X-API-Key` header and the body `{"yaml_content": "<the whole YAML>", "save_to_disk": true}`, or `PATCH /api/yaml/config` with `{"updates": {...}, "save_to_disk": true}`.
+
+Each save is a new version and applies live on every pod — no restart. (A few settings, such as brokers, make the agency reload itself in place within seconds.) So wherever this README or a comment says "uncomment X in `configs/config.yaml`", do it in the file before the first start, or in Studio's YAML editor after it.
+
+## Changing a running project (Docker)
+
+What reaches a project that is already running (leafmesh 2.4.497). The
+image holds the Python code and the first-start `configs/config.yaml`;
+`.env` is passed in when the container is created; the store (Redis) keeps
+its data on its own volume.
+
+| You change | When it applies |
+|---|---|
+| An agent in Studio (prompt, model, tools, routes, human seats, schedules, …) | At once, no restart |
+| A human seat's `channels` (Slack, email, …) | The agency reloads itself in place within seconds |
+| Add or delete an agent in Studio | At once, including routes and schedules |
+| A connection in the vault (model keys, MCP, webhooks, connectors, Slack, email) | At once. An agent switched off for a missing connection or address switches back on by itself |
+| Anything in `.env` (licence, agency name, store, ports) | After `docker compose up -d` (the container is recreated) |
+| Python code (`agency/*.py`: programmatic agents, tools, `@pre_compose`) | After a rebuild: `docker compose up -d --build` |
+| `configs/config.yaml` | Never after the first start. It is read only when the store is empty |
+| Several app containers on one store | A Studio save reaches every one within about 15 seconds |
+
+- Keep model keys in the vault. A key there wins over the same key in
+  `.env` (the log warns), and a change applies at once. From 2.4.497 that
+  holds for every value the vault holds (endpoints, organisation / project
+  ids, cloud identities); the `.env` value returns when the record goes.
+- Code the image does not have: an agent marked pure Python
+  (`integration: python`) is switched off until its function is in the image;
+  any other programmatic agent stays on, and each call to code it does not
+  have fails. Rebuild the image with the code first.
+- A new Redis volume is an empty store, so `configs/config.yaml` is imported
+  again as version 1.
+- **If the agency refuses to start after an upgrade** (a new leafmesh pin,
+  then a rebuild: "Configuration has N error(s) in the stored
+  configuration"), repair the stored configuration with the agency stopped:
+
+  ```bash
+  docker compose run --rm app leafmesh config check      # each problem, with its line
+  docker compose run --rm app leafmesh config versions   # kept versions: which pass, which is in use
+  docker compose run --rm app leafmesh config rollback   # back to the newest version that passes (saved as a new version)
+  ```
+
+  Or `leafmesh config export > config.yaml`, fix it by hand, then
+  `leafmesh config import config.yaml` (it is checked before it is saved).
+
+## Where the data store is set
+
+From leafmesh 2.4.482 the store (Redis or Postgres) is set **only in `.env`** — never in `configs/config.yaml`. A `persistence:` block in the YAML is ignored with a warning on leafmesh 2.4.482–2.4.485; from 2.4.486 the agency refuses to start if that block differs from `.env`, and names each `.env` line to add. The project's `.env` sets the store explicitly (`LEAFMESH_STORE`, `LEAFMESH_AGENCY_NAME`, `REDIS_*`).
+
+- Redis (default): `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`; optional `REDIS_DEFAULT_TTL`, `REDIS_SESSION_TTL`, `REDIS_SSL*`, `REDIS_CLUSTER_NODES`.
+- Postgres instead: `LEAFMESH_STORE=postgres` plus `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` (optional `POSTGRES_SSLMODE`).
+- Or the whole server in one value: `REDIS_URL=redis://user:pw@host:6379/0` (`rediss://` turns TLS on) or `DATABASE_URL=postgresql://user:pw@host:5432/db`. The single names fill in what the URL leaves out.
+- With Docker Compose the app reaches Redis as `redis` (the service name); compose sets that for you.
+- Check it in Studio → **Infrastructure → Datastores**: it shows whether the store is reachable (never the address or password).
+
+## This mesh's sign-in (leafmesh 2.4.497)
+
+From leafmesh 2.4.497 each mesh signs in to LeafCraft with its own key, not
+a key shared by every install.
+
+- **First start.** The mesh makes a key pair and registers it with
+  `LEAFMESH_LICENSE_KEY` and `LEAFMESH_ENV_TOKEN` from `.env` (copy the
+  environment token from Studio — a placeholder such as `development` is
+  refused). With both valid it works at once. If your organisation turned on
+  "require approval", the first start stops and says so: approve it in
+  Studio → **Keys → SDK access**, then start again. Organisation admins get an
+  email for every new registration.
+- **Where the key lives.** In the vault, in the store, encrypted with
+  `LEAFMESH_VAULT_KEY`: it survives rebuilds and every copy of the app shares
+  it. A new Redis volume, or a new vault key, makes a new key pair that
+  registers again — revoke the old one in Studio.
+- **Check or change it** (in Docker: `docker compose run --rm app leafmesh auth status`):
+  - `leafmesh auth status` — credential id, key fingerprint, registration and
+    mode, never a key; `--check` signs in now and reports the tokens.
+  - `leafmesh auth register` — register now.
+  - `leafmesh auth rotate` — a new key pair: once it is active the mesh
+    switches to it and revokes the old one. A revoked or expired key is never
+    revived; rotate instead.
+- **Lost the environment token?** From 5 Dec 2026 Studio shows the licence
+  key and environment token only once, when they are made (then only a hint).
+  Rotate the environment token in Studio and put the new one in `.env`.
+  Rotating it changes where the agency's data is kept in the store, so do it
+  before the agency holds data.
+- **An existing project whose `.env` says `LEAFMESH_ENV_TOKEN=development`.**
+  2.4.497 needs the real token. The token also names where the agency's data
+  sits in the store, so with the real token the agency starts on an empty
+  store (vault, sessions, board) — the old data stays under the old name. Set
+  the real token before you put data in the agency, or contact us to move it.
+
+## Your vault key — back it up
+
+`create-leafmesh` put a `LEAFMESH_VAULT_KEY` in your `.env` when it made this project. It is the master key that encrypts every connection and credential you store in the vault (in Redis / Postgres).
+
+- **Back it up like a master password.** Lose it and every stored connection has to be entered again.
+- **Never change or regenerate it** for an existing project — a new key locks the existing vault. To change it, use `leafmesh vault rotate-key`.
+- Every copy of the app (every replica) must get the **same** value. Docker Compose passes it in from `.env` as an environment variable.
+- Never commit `.env` (it is already in `.gitignore`).

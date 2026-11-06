@@ -1,11 +1,11 @@
 """expense-reimbursement — Expense-Reimbursement Pod (LeafMesh).
 
 Boot order matters (SDK 2.4.131):
-  1. import agency.tools  → the @global_tool decorators run BEFORE from_yaml/start,
+  1. import agency.tools  → the @global_tool decorators run BEFORE from_store/start,
      so Odo's read_proofs / read_calendar_window / list_prior_claims are registered.
-  2. LeafMesh.from_yaml(...) → auto_discover wires agency/*_agent.py to the YAML.
+  2. LeafMesh.from_store() → auto_discover wires agency/*_agent.py to the YAML.
   3. audit_logger.register(...) → attach the WORM sink to the custom external
-     expense_audit_logger_agent (must be after from_yaml, before start).
+     expense_audit_logger_agent (must be after from_store, before start).
   4. leafmesh.start().
 """
 import asyncio
@@ -21,7 +21,7 @@ from agency._shared import audit_logger as _audit_logger
 load_dotenv()
 logger = LeafMeshLogger(__name__)
 
-leafmesh = LeafMesh.from_yaml("configs/config.yaml")
+leafmesh = LeafMesh.from_store()
 
 # WORM audit sink — terminus for submissions, approvals, payouts, AND held gates.
 _audit_logger.register(leafmesh, "expense_audit_logger_agent")

@@ -1,21 +1,21 @@
 """Hash-chained WORM audit sink for the expense-reimbursement pod.
 
-`expense_audit_logger_agent` in configs/config.yaml is `agent_type: external`
+`expense_audit_logger_agent` in the configuration is `agent_type: external`
 with `framework: custom`. SDK 2.4+ executes custom external agents via an
 *intelligence function* registered on the LeafMesh instance:
 
     from agency._shared import audit_logger
-    leafmesh = LeafMesh.from_yaml("configs/config.yaml")
-    audit_logger.register(leafmesh)          # ← main.py does this, after from_yaml, before start
+    leafmesh = LeafMesh.from_store()
+    audit_logger.register(leafmesh)          # ← main.py does this, after from_store, before start
 
 Dev mode writes hash-chained JSON lines to ./logs/expense_audit.jsonl.
 Production swaps `_dispatch_local` for S3 Object Lock / Datadog / Splunk HEC.
 
 Hash-chain invariant: each entry embeds the SHA-256 of the prior entry's body,
 so any insertion or deletion is detectable post-hoc. This sink is the TERMINUS
-for every outcome that matters — a submitted claim, an approval, a payout, AND
-every gate HELD on timeout (default-deny): a held claim is recorded, never
-silently dropped.
+for every outcome that matters — a submitted claim, an approval, a payout, a
+reject and a hold. (On leafmesh 2.4.486 a seat that times out does not route
+here yet: its Inbox card closes and the ticket records that no reply came.)
 """
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ def register(mesh: Any, agent_name: str = "expense_audit_logger_agent") -> bool:
     """Register the audit intelligence function on a LeafMesh instance.
 
     SDK 2.4+: custom external agents execute through
-    `mesh.intelligence("<agent_name>")`. Call AFTER `from_yaml()`, before `start()`.
+    `mesh.intelligence("<agent_name>")`. Call AFTER `from_store()`, before `start()`.
     """
     if not callable(getattr(mesh, "intelligence", None)):
         logger.warning("[audit] mesh has no .intelligence() — audit sink NOT registered")

@@ -4,7 +4,7 @@ When a human approves/confirms in the inbox, the SDK resumes the chain with ONLY
 the human-response meta fields (`human_message`, `human_decision`, …) — the claim
 payload flowing through the chain is NOT re-delivered to the next agent. So the
 finisher (Sol) and the form builder (Fern) stash the full claim context here,
-keyed by `session_id`, and recover it after the human gate.
+keyed by `session_id`, and recover it after the human step.
 
 In-process only — survives the human wait because the mesh is one process. A
 multi-replica deployment swaps this for the Redis session store; the get/put

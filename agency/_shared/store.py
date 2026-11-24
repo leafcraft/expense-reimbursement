@@ -111,7 +111,7 @@ SEED_CLAIMS: dict[str, dict[str, Any]] = {
              "category": "lodging", "nights": 3, "legible": True},
         ],
     },
-    # Happy path: clean, inside every cap -> form -> approver -> Finance.
+    # Happy path: clean, inside every cap -> form -> decision-maker -> Finance.
     # 286.20 + 2 x 174.00 + 48.60 = 682.80
     "CLM-DEMO-003": {
         "employee_id": "emp-3315",

@@ -3,7 +3,7 @@
 Four digital employees + four human roles that run an employee travel-expense
 claim end to end — **receipts → confidence-scored extraction → policy pre-check →
 form → employee confirm → approval (Box e-sign) → finance → payout & live
-status** — with a human on every gate and the systems (Outlook / Box / SAP) as
+status** — with a human on every decision and the systems (Outlook / Box / SAP) as
 tools inside the agents, never members.
 
 **Read `PRD.md`** for the full agent-by-agent spec. This is a **pod-standard
@@ -22,11 +22,12 @@ form and returns to Odo on a mismatch (once — a second mismatch goes to the
 Finance-Ops Lead) rather than balancing the books itself. **Odo's floor
 re-checks the expense policy** — a hotel night over the cap or a receipt
 already claimed on an earlier claim goes to the Finance-Ops Lead, whatever the
-model said. **Sol re-checks that the approver actually approved** before it
+model said. **Sol re-checks that the decision-maker actually approved** before it
 issues anything, and **deletes a half-issued pack** if its floor trips.
 **Silence never advances a claim** — if nobody answers within the reply window,
-the Inbox card closes and the ticket records that no reply came; nothing is
-approved or paid, and nobody is chased automatically. Every decision, send, and approval lands in
+the seat's default reply, `hold`, goes through its routes like any reply (an
+approval seat's `hold` lands in the audit log); nothing is approved or paid,
+and nobody is chased automatically. Every decision, send, and approval lands in
 a hash-chained WORM ledger. ROI: ≥75% less employee time per claim, real
 approval control, and a live "where is my claim?" answer.
 
@@ -34,17 +35,17 @@ approval control, and a live "where is my claim?" answer.
 
 | Agent | Role (human job title) | Responsibilities | Can perform |
 |---|---|---|---|
-| `remi_coordinator_agent` | Claim Coordinator | Owns the case end to end; opens it, keeps live status, is the employee's one contact | LLM; orchestrates Odo→Fern→Sol; routes exceptions to the Finance-Ops Lead; **never reads a receipt or approves** |
+| `remi_coordinator_agent` | Claim Coordinator | Owns the case end to end; opens it, keeps live status, is the employee's one contact | LLM + **playbook** (`open_case`, `status`, `escalate`); orchestrates Odo→Fern→Sol; routes exceptions to the Finance-Ops Lead; **never reads a receipt or approves** |
 | `odo_extraction_agent` | Proofs & Extraction Analyst | Collects every proof, reads each with a confidence score, classifies, runs the policy pre-check | LLM + **super_agent** (autonomous multi-proof) + **playbook** (extraction craft) + proof tools; `@chain` **confidence floor** (fail closed) |
 | `fern_builder_agent` | Claim Builder | Fills the reimbursement form from Odo's verified data, cross-checks, gets the employee's one-look confirmation | LLM + **playbook**; `@chain` **cross-check floor**; renders the draft form to `./out` |
 | `sol_finance_agent` | Approvals & Finance Liaison | Routes Box approval (e-sign), submits the approved pack to Finance, tracks payout, records the ledger | Programmatic **finisher**; approve-token re-check → invariants → render pack → **delete-on-block** → WORM ledger |
-| `finance_ops_lead_human` | Accountable owner (Human) | Reviews exceptions, owns policy calls, decides every gate | Human gate — everything that leaves the pod |
-| `employee_human` | Claimant (Human) | Submits receipts, answers Odo's questions, confirms the form | Human gate |
-| `approver_human` | Manager (Human) | Approves or rejects in the Box workflow | Human gate |
-| `finance_officer_human` | Finance (Human) | Processes the approved, ledgered pack to payment | Human gate |
+| `finance_ops_lead_human` | Accountable owner (Human) | Reviews exceptions, owns policy calls, makes every final call | Human step — everything that leaves the pod |
+| `employee_human` | Claimant (Human) | Submits receipts, answers Odo's questions, confirms the form | Human member |
+| `approver_human` | Manager (Human) | Approves or rejects in the Box workflow | Human member |
+| `finance_officer_human` | Finance (Human) | Processes the approved, ledgered pack to payment | Human member |
 | `expense_audit_logger_agent` | WORM audit | Hash-chains every decision, approval, send, and held gate | External (custom sink); terminus |
 
-Reply windows (`human_timeout_seconds`): Claimant 2 days, Manager (approver)
+Reply windows (`human_timeout_seconds`): Claimant 2 days, Manager (decision-maker)
 2 days, Finance 5 days (the weekly payment run), Finance-Ops Lead 3 days.
 
 The **LeafMesh Manager** supervises. It escalates to the Finance-Ops Lead when an
@@ -76,7 +77,7 @@ that **announce themselves** until you wire Tiers 2–3.
 ### Tier 1 — required to boot (dev mode)
 | Setting | For | Notes |
 |---|---|---|
-| `LEAFMESH_LICENSE_KEY` | LeafMesh runtime | **Required.** |
+| `LEAFMESH_LICENSE_KEY` | first start | Not kept in `.env`: `create-leafmesh --start` (or `--load`) asks for it once at the first start to sign this environment in (leafmesh 2.4.538+) |
 | `ANTHROPIC_API_KEY` | Odo + Fern (Claude) | **Required.** |
 | `OPENAI_API_KEY` | Remi + Manager (`gpt-4o-mini`) | **Required** unless you change the models. |
 | `REDIS_HOST` / `PORT` / `PASSWORD` | State store | Defaults to `localhost:6379`. Bring your own Redis, or let `create-leafmesh --start .` start one. |
@@ -130,8 +131,8 @@ employee rather than guess. The other seed claims, one per route:
 
 | `claim_id` | What happens |
 |---|---|
-| `CLM-DEMO-002` | International (EUR); Odo converts, caps checked → form → approver |
-| `CLM-DEMO-003` | Clean domestic trip, $682.80, inside every cap → form → approver → Finance |
+| `CLM-DEMO-002` | International (EUR); Odo converts, caps checked → form → decision-maker |
+| `CLM-DEMO-003` | Clean domestic trip, $682.80, inside every cap → form → decision-maker → Finance |
 | `CLM-DEMO-004` | Hotel at $412 a night vs the $250 cap → `over_cap` → Finance-Ops Lead |
 | `CLM-DEMO-005` | Re-claims the airfare from `CLM-DEMO-001` → `duplicate_receipt` → Finance-Ops Lead |
  On approval, Sol renders the approved pack to `./out/`

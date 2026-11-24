@@ -8,15 +8,15 @@ entry. It is the concrete "@chain fails closed":
   a) approval RE-CHECK — reaching this agent does not mean approved. An
      allow-token allowlist + block-token denylist; an UNKNOWN verdict fails closed.
   b) deterministic invariants a human can't waive: real line-items, and the
-     approval came from the approver seat (`approver_human`) — not from the
+     approval came from the deciding seat (`approver_human`) — not from the
      claimant's own seat or any other seat.
   c) render the real pack to ./out; on a tripped floor, DELETE the partial and
      record `status: blocked` with reasons — never a half-issued claim.
-  d) dev-store recovery — after the HITL gate the upstream payload is dropped,
+  d) dev-store recovery — after the human step the upstream payload is dropped,
      so Sol recovers the claim from the session stash / dev store.
 
 Two phases: first call (from Fern, confirmed) → route for approval; second call
-(from the approver, approved) → issue + submit to finance.
+(from the decision-maker, approved) → issue + submit to finance.
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def _signal(input_data: dict) -> str:
     if isinstance(up, dict):
         sources.extend(v for v in up.values() if isinstance(v, dict))
     for src in sources:
-        for key in ("human_message", "human_decision", "decision", "message"):
+        for key in ("verdict", "human_message", "human_decision", "decision", "message"):
             val = src.get(key)
             if isinstance(val, str) and val.strip():
                 return val.strip().lower()
@@ -188,6 +188,6 @@ async def sol_finance_agent(llm_response: Any, input_data: dict, context: dict) 
     elif _is_blocked(input_data):
         out["status"] = "blocked"
     else:
-        out["status"] = "routed"                   # phase 1 — send to the approver
+        out["status"] = "routed"                   # phase 1 — send to the decision-maker
         out["routed_for_approval"] = True
     return out
